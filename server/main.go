@@ -16,8 +16,13 @@ type PriceType struct {
 	Bid string `json:"bid"`
 }
 
-func fetchPrice() (*PriceType, error) {
-	resp, err := http.Get("https://economia.awesomeapi.com.br/json/last/USD-BRL")
+func fetchPrice(ctx context.Context) (*PriceType, error) {
+	req, err := http.NewRequestWithContext(ctx, "GET", "https://economia.awesomeapi.com.br/json/last/USD-BRL", nil)
+	if err != nil {
+		return nil, err
+	}
+
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -30,13 +35,13 @@ func fetchPrice() (*PriceType, error) {
 
 	price, ok := result["USDBRL"]
 	if !ok {
-		return nil, fmt.Errorf("cotacao not found")
+		return nil, fmt.Errorf("price not found")
 	}
 
 	return &price, nil
 }
 
-func savePrice(ctx context.Context, cotacao *PriceType) error {
+func savePrice(ctx context.Context, price *PriceType) error {
 
 	db, err := sql.Open("sqlite3", "./price.db")
 	if err != nil {
@@ -50,22 +55,30 @@ func savePrice(ctx context.Context, cotacao *PriceType) error {
 		return err
 	}
 
-	_, err = db.ExecContext(ctx, "INSERT INTO dolarPrice (bid) VALUES (?)", cotacao.Bid)
+	_, err = db.ExecContext(ctx, "INSERT INTO dolarPrice (bid) VALUES (?)", price.Bid)
 
 	return err
 }
 
 func PriceHandler(w http.ResponseWriter, r *http.Request) {
-	price, err := fetchPrice()
+	ctxAPI, cancelAPI := context.WithTimeout(r.Context(), 200*time.Millisecond)
+	defer cancelAPI()
+
+	price, err := fetchPrice(ctxAPI)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		log.Printf("Error fetching price: %v", err)
+		http.Error(w, "Failed to fetch price", http.StatusInternalServerError)
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
-	defer cancel()
+	ctxDB, cancelDB := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancelDB()
 
-	savePrice(ctx, price)
+	if err := savePrice(ctxDB, price); err != nil {
+		log.Printf("Error saving price: %v", err)
+		http.Error(w, "Failed to save price", http.StatusInternalServerError)
+		return
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(price)
